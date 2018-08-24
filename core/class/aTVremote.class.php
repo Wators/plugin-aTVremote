@@ -70,6 +70,68 @@ class aTVremote extends eqLogic {
 		}		
 	}
 
+	public static function deamon_info() {
+		$return = array();
+		$return['log'] = 'aTVremote';
+		$return['state'] = 'nok';
+		$pid_file = jeedom::getTmpFolder('aTVremote') . '/deamon.pid';
+		if (file_exists($pid_file)) {
+			if (@posix_getsid(trim(file_get_contents($pid_file)))) {
+				$return['state'] = 'ok';
+			} else {
+				shell_exec(system::getCmdSudo() . 'rm -rf ' . $pid_file . ' 2>&1 > /dev/null');
+			}
+		}
+		$return['launchable'] = 'ok';
+		return $return;
+	}
+
+	public static function deamon_start() {
+		log::remove(__CLASS__ . '_update');
+		self::deamon_stop();
+		$deamon_info = self::deamon_info();
+		if ($deamon_info['launchable'] != 'ok') {
+			throw new Exception(__('Veuillez vérifier la configuration', __FILE__));
+		}
+		$aTVremote_path = realpath(dirname(__FILE__) . '/../../resources/aTVremoted');
+		$cmd = 'sudo /usr/bin/python3 ' . $aTVremote_path . '/aTVremoted.py';
+		$cmd .= ' --loglevel ' . log::convertLogLevel(log::getLogLevel('aTVremote'));
+		$cmd .= ' --socketport ' . config::byKey('socketport', 'aTVremote');
+		$cmd .= ' --callback ' . network::getNetworkAccess('internal', 'proto:127.0.0.1:port:comp') . '/plugins/aTVremote/core/php/jeeaTVremote.php';
+		$cmd .= ' --apikey ' . jeedom::getApiKey('aTVremote');
+		$cmd .= ' --cycle ' . config::byKey('cycle', 'aTVremote');
+		$cmd .= ' --pid ' . jeedom::getTmpFolder('aTVremote') . '/deamon.pid';
+		log::add('aTVremote', 'info', 'Lancement démon aTVremote : ' . $cmd);
+		$result = exec($cmd . ' >> ' . log::getPathToLog('aTVremote') . ' 2>&1 &');
+		$i = 0;
+		while ($i < 30) {
+			$deamon_info = self::deamon_info();
+			if ($deamon_info['state'] == 'ok') {
+				break;
+			}
+			sleep(1);
+			$i++;
+		}
+		if ($i >= 30) {
+			log::add('aTVremote', 'error', 'Impossible de lancer le démon aTVremoted, vérifiez le log', 'unableStartDeamon');
+			return false;
+		}
+		message::removeAll('aTVremote', 'unableStartDeamon');
+		sleep(2);
+		self::sendIdToDeamon();
+		return true;
+	}
+
+	public static function deamon_stop() {
+		$pid_file = jeedom::getTmpFolder('aTVremote') . '/deamon.pid';
+		if (file_exists($pid_file)) {
+			$pid = intval(trim(file_get_contents($pid_file)));
+			system::kill($pid);
+		}
+		system::kill('aTVremoted.py');
+		system::fuserk(config::byKey('socketport', 'aTVremote'));
+	}	
+	
 	public static function dependancy_info() {
 		$return = array();
 		$return['progress_file'] = jeedom::getTmpFolder('aTVremote') . '/dependance';
@@ -639,6 +701,40 @@ class aTVremote extends eqLogic {
 
 		$this->getaTVremoteInfo(null,$order);
 	}
+	public function sendDaemon ($value) {
+		$deamon_info = self::deamon_info();
+		if ($deamon_info['state'] != 'ok') {
+			return;
+		}
+		$socket = socket_create(AF_INET, SOCK_STREAM, 0);
+		socket_connect($socket, '127.0.0.1', config::byKey('socketport', 'aTVremote'));
+		socket_write($socket, $value, strlen($value));
+		socket_close($socket);
+	}
+	
+	public static function sendIdToDeamon() {
+		foreach (self::byType('aTVremote') as $eqLogic) {
+			$eqLogic->allowDevice();
+			usleep(300);
+		}
+	}
+
+	public function preRemove() {
+		$this->disallowDevice();
+	}
+	
+	public function allowDevice() {
+		$value = json_encode(array('apikey' => jeedom::getApiKey('aTVremote'), 'cmd' => 'add' , 'id' => $this->getLogicalId() , 'model' => $this->getConfiguration('model','')));
+		aTVremote::sendDaemon($value);
+	}
+
+	public function disallowDevice() {
+		if ($this->getLogicalId() == '') {
+			return;
+		}
+		$value = json_encode(array('apikey' => jeedom::getApiKey('aTVremote'), 'cmd' => 'remove', 'id' => $this->getLogicalId()));
+		aTVremote::sendDaemon($value);
+	}	
 }
 
 class aTVremoteCmd extends cmd {
